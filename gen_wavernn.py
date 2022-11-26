@@ -35,7 +35,7 @@ def gen_testset(model: WaveRNN, test_set, samples, batched, target, overlap, sav
         _ = model.generate(m, save_str, batched, target, overlap, hp.mu_law)
 
 
-def gen_from_file(model: WaveRNN, load_path: Path, save_path: Path, batched, target, overlap):
+def gen_from_file(model: WaveRNN, load_path: Path, save_path: Path, batched, target, overlap, i):
 
     k = model.get_step() // 1000
     file_name = load_path.stem
@@ -47,12 +47,23 @@ def gen_from_file(model: WaveRNN, load_path: Path, save_path: Path, batched, tar
         mel = melspectrogram(wav)
     elif suffix == ".npy":
         mel = np.load(load_path)
-        if mel.ndim != 2 or mel.shape[0] != hp.num_mels:
+        if mel.ndim == 2 and mel.shape[1] == hp.num_mels:
+            mel = mel.T
+        elif mel.ndim != 2 or mel.shape[0] != hp.num_mels:
             raise ValueError(f'Expected a numpy array shaped (n_mels, n_hops), but got {wav.shape}!')
         _max = np.max(mel)
         _min = np.min(mel)
         if _max >= 1.01 or _min <= -0.01:
-            raise ValueError(f'Expected spectrogram range in [0,1] but was instead [{_min}, {_max}]')
+            min_level_db = _min - _max
+            mel = np.clip((mel - min_level_db) / -min_level_db, 0, 1)
+            '''
+            mel -= _min
+            print(_min)
+            mel /= (_max - _min)
+            print((_max - _min))
+            '''
+            print("mel scaled")
+            #raise ValueError(f'Expected spectrogram range in [0,1] but was instead [{_min}, {_max}]')
     else:
         raise ValueError(f"Expected an extension of .wav or .npy, but got {suffix}!")
 
@@ -60,7 +71,7 @@ def gen_from_file(model: WaveRNN, load_path: Path, save_path: Path, batched, tar
     mel = torch.tensor(mel).unsqueeze(0)
 
     batch_str = f'gen_batched_target{target}_overlap{overlap}' if batched else 'gen_NOT_BATCHED'
-    save_str = save_path/f'__{file_name}__{k}k_steps_{batch_str}.wav'
+    save_str = save_path/f'{i}.wav'
 
     _ = model.generate(mel, save_str, batched, target, overlap, hp.mu_law)
 
@@ -74,6 +85,7 @@ if __name__ == "__main__":
     parser.add_argument('--target', '-t', type=int, help='[int] number of samples in each batch index')
     parser.add_argument('--overlap', '-o', type=int, help='[int] number of crossover samples')
     parser.add_argument('--file', '-f', type=str, help='[string/path] for testing a wav outside dataset')
+    parser.add_argument('--file_list', '-fl', type=str, help='files to generate')
     parser.add_argument('--voc_weights', '-w', type=str, help='[string/path] Load in different WaveRNN weights')
     parser.add_argument('--gta', '-g', dest='gta', action='store_true', help='Generate from GTA testset')
     parser.add_argument('--force_cpu', '-c', action='store_true', help='Forces CPU-only training, even when in CUDA capable environment')
@@ -131,10 +143,15 @@ if __name__ == "__main__":
     simple_table([('Generation Mode', 'Batched' if batched else 'Unbatched'),
                   ('Target Samples', target if batched else 'N/A'),
                   ('Overlap Samples', overlap if batched else 'N/A')])
-
-    if file:
+    if args.file_list:
+        with open(args.file_list, 'r') as f:
+            for i, mel in enumerate(f):
+                f_path= Path(mel[:-1]).expanduser()
+                print(f_path)
+                gen_from_file(model, f_path, paths.voc_output, batched, target, overlap, i+127)
+    elif file:
         file = Path(file).expanduser()
-        gen_from_file(model, file, paths.voc_output, batched, target, overlap)
+        gen_from_file(model, file, paths.voc_output, batched, target, overlap, "file")
     else:
         _, test_set = get_vocoder_datasets(paths.data, 1, gta)
         gen_testset(model, test_set, samples, batched, target, overlap, paths.voc_output)

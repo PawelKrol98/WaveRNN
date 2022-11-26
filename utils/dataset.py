@@ -34,16 +34,20 @@ class VocoderDataset(Dataset):
 
 def get_vocoder_datasets(path: Path, batch_size, train_gta):
 
-    with open(path/'dataset.pkl', 'rb') as f:
-        dataset = pickle.load(f)
 
-    dataset_ids = [x[0] for x in dataset]
+    test_ids = []
+    train_ids = []
 
-    random.seed(1234)
-    random.shuffle(dataset_ids)
+    with open('train.txt', 'r') as f:
+        for line in f:
+            train_ids.append(line[0:10])
 
-    test_ids = dataset_ids[-hp.voc_test_samples:]
-    train_ids = dataset_ids[:-hp.voc_test_samples]
+    with open('val.txt', 'r') as f:
+        for line in f:
+            test_ids.append(line[0:10])
+
+    print("train_ids: {} len {}".format(train_ids, len(train_ids)))
+    print("test_ids: {} len {}".format(test_ids, len(test_ids)))
 
     train_dataset = VocoderDataset(path, train_ids, train_gta)
     test_dataset = VocoderDataset(path, test_ids, train_gta)
@@ -56,7 +60,8 @@ def get_vocoder_datasets(path: Path, batch_size, train_gta):
                            pin_memory=True)
 
     test_set = DataLoader(test_dataset,
-                          batch_size=1,
+                          collate_fn=collate_vocoder,
+                          batch_size=4,
                           num_workers=1,
                           shuffle=False,
                           pin_memory=True)
@@ -103,39 +108,66 @@ def get_tts_datasets(path: Path, batch_size, r):
     with open(path/'dataset.pkl', 'rb') as f:
         dataset = pickle.load(f)
 
-    dataset_ids = []
-    mel_lengths = []
+    test_ids = []
+    train_ids = []
 
-    for (item_id, len) in dataset:
-        if len <= hp.tts_max_mel_len:
-            dataset_ids += [item_id]
-            mel_lengths += [len]
+    with open('train.txt', 'r') as f:
+        for line in f:
+            train_ids.append(line[0:10])
+
+    with open('val.txt', 'r') as f:
+        for line in f:
+            test_ids.append(line[0:10])
+
+    train_dataset_ids = []
+    train_mel_lengths = []
+    test_dataset_ids = []
+    test_mel_lengths = []
+
+    for (item_id, length) in dataset:
+        if length <= hp.tts_max_mel_len and item_id in test_ids:
+            test_dataset_ids += [item_id]
+            test_mel_lengths += [length]
+        elif length <= hp.tts_max_mel_len and item_id in train_ids:
+            train_dataset_ids += [item_id]
+            train_mel_lengths += [length]
+    print("Length of test data ids: ", len(test_dataset_ids))
+    print("Length of train data ids: ", len(train_dataset_ids))
 
     with open(path/'text_dict.pkl', 'rb') as f:
         text_dict = pickle.load(f)
 
-    train_dataset = TTSDataset(path, dataset_ids, text_dict)
+    train_dataset = TTSDataset(path, train_dataset_ids, text_dict)
+    test_dataset = TTSDataset(path, test_dataset_ids, text_dict)
 
     sampler = None
 
     if hp.tts_bin_lengths:
-        sampler = BinnedLengthSampler(mel_lengths, batch_size, batch_size * 3)
+        train_sampler = BinnedLengthSampler(train_mel_lengths, batch_size, batch_size * 3)
+        test_sampler = BinnedLengthSampler(test_mel_lengths, batch_size, batch_size * 3)
 
     train_set = DataLoader(train_dataset,
                            collate_fn=lambda batch: collate_tts(batch, r),
                            batch_size=batch_size,
-                           sampler=sampler,
+                           sampler=train_sampler,
                            num_workers=1,
                            pin_memory=True)
 
-    longest = mel_lengths.index(max(mel_lengths))
+    test_set = DataLoader(test_dataset,
+                           collate_fn=lambda batch: collate_tts(batch, r),
+                           batch_size=4,
+                           sampler=test_sampler,
+                           num_workers=1,
+                           pin_memory=True)
+
+    longest = train_mel_lengths.index(max(train_mel_lengths))
 
     # Used to evaluate attention during training process
-    attn_example = dataset_ids[longest]
+    attn_example = train_dataset_ids[longest]
 
     # print(attn_example)
 
-    return train_set, attn_example
+    return train_set, test_set, attn_example
 
 
 class TTSDataset(Dataset):

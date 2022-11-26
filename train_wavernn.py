@@ -87,6 +87,27 @@ def main():
     print('Training Complete.')
     print('To continue training increase voc_total_steps in hparams.py or use --force_train')
 
+def validate(model: WaveRNN, test_set, samples, loss_func, device):
+
+    k = model.get_step() // 1000
+    running_loss = 0.
+    
+    for i, (x, y, m) in enumerate(test_set, 1):
+        x, m, y = x.to(device), m.to(device), y.to(device)
+        if i > samples: break
+
+        y_hat = model(x, m)
+        if model.mode == 'RAW':
+            y_hat = y_hat.transpose(1, 2).unsqueeze(-1)
+        elif model.mode == 'MOL':
+            y = y.float()
+        y = y.unsqueeze(-1)
+        loss = loss_func(y_hat, y)
+        running_loss += loss.item()
+        avg_loss = running_loss/i
+
+    return avg_loss
+
 
 def voc_train_loop(paths: Paths, model: WaveRNN, loss_func, optimizer, train_set, test_set, lr, total_steps):
     # Use same device as model parameters
@@ -96,12 +117,12 @@ def voc_train_loop(paths: Paths, model: WaveRNN, loss_func, optimizer, train_set
 
     total_iters = len(train_set)
     epochs = (total_steps - model.get_step()) // total_iters + 1
-
+    val_loss = 0
     for e in range(1, epochs + 1):
+
 
         start = time.time()
         running_loss = 0.
-
         for i, (x, y, m) in enumerate(train_set, 1):
             x, m, y = x.to(device), m.to(device), y.to(device)
 
@@ -126,7 +147,7 @@ def voc_train_loop(paths: Paths, model: WaveRNN, loss_func, optimizer, train_set
             loss.backward()
             if hp.voc_clip_grad_norm is not None:
                 grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), hp.voc_clip_grad_norm)
-                if np.isnan(grad_norm):
+                if torch.isnan(grad_norm):
                     print('grad_norm was NaN!')
             optimizer.step()
 
@@ -139,13 +160,11 @@ def voc_train_loop(paths: Paths, model: WaveRNN, loss_func, optimizer, train_set
             k = step // 1000
 
             if step % hp.voc_checkpoint_every == 0:
-                gen_testset(model, test_set, hp.voc_gen_at_checkpoint, hp.voc_gen_batched,
-                            hp.voc_target, hp.voc_overlap, paths.voc_output)
+                val_loss = validate(model, test_set, hp.voc_gen_at_checkpoint, loss_func, device)
                 ckpt_name = f'wave_step{k}K'
                 save_checkpoint('voc', paths, model, optimizer,
                                 name=ckpt_name, is_silent=True)
-
-            msg = f'| Epoch: {e}/{epochs} ({i}/{total_iters}) | Loss: {avg_loss:.4f} | {speed:.1f} steps/s | Step: {k}k | '
+            msg = f'| Epoch: {e}/{epochs} ({i}/{total_iters})| val_loss: {val_loss:.4f} | Loss: {avg_loss:.4f} | {speed:.1f} steps/s | Step: {k}k | '
             stream(msg)
 
         # Must save latest optimizer state to ensure that resuming training

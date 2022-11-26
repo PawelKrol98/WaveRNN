@@ -94,8 +94,8 @@ def main():
                             ('Learning Rate', lr),
                             ('Outputs/Step (r)', model.r)])
 
-            train_set, attn_example = get_tts_datasets(paths.data, batch_size, r)
-            tts_train_loop(paths, model, optimizer, train_set, lr, training_steps, attn_example)
+            train_set, test_set, attn_example = get_tts_datasets(paths.data, batch_size, r)
+            tts_train_loop(paths, model, optimizer, train_set, test_set, lr, training_steps, attn_example)
 
         print('Training Complete.')
         print('To continue training increase tts_total_steps in hparams.py or use --force_train\n')
@@ -103,26 +103,46 @@ def main():
 
     print('Creating Ground Truth Aligned Dataset...\n')
 
-    train_set, attn_example = get_tts_datasets(paths.data, 8, model.r)
+    train_set, test_set, attn_example = get_tts_datasets(paths.data, 8, model.r)
     create_gta_features(model, train_set, paths.gta)
+    create_gta_features(model, test_set, paths.gta)
 
     print('\n\nYou can now train WaveRNN on GTA features - use python train_wavernn.py --gta\n')
 
+def validate(model: Tacotron, test_set, samples, device):
 
-def tts_train_loop(paths: Paths, model: Tacotron, optimizer, train_set, lr, train_steps, attn_example):
+    k = model.get_step() // 1000
+    running_loss = 0.
+    
+    for i, (x, m, ids, _) in enumerate(test_set, 1):
+        x, m = x.to(device), m.to(device)
+        if i > samples: break
+
+        if device.type == 'cuda' and torch.cuda.device_count() > 1:
+            m1_hat, m2_hat, attention = data_parallel_workaround(model, x, m)
+        else:
+            m1_hat, m2_hat, attention = model(x, m)
+        m1_loss = F.l1_loss(m1_hat, m)
+        m2_loss = F.l1_loss(m2_hat, m)
+        loss = m1_loss + m2_loss
+        running_loss += loss.item()
+        avg_loss = running_loss / i
+
+    return avg_loss
+
+def tts_train_loop(paths: Paths, model: Tacotron, optimizer, train_set, test_set, lr, train_steps, attn_example):
     device = next(model.parameters()).device  # use same device as model parameters
 
     for g in optimizer.param_groups: g['lr'] = lr
 
     total_iters = len(train_set)
     epochs = train_steps // total_iters + 1
-
     for e in range(1, epochs+1):
 
         start = time.time()
         running_loss = 0
-
         # Perform 1 epoch
+        val_loss = validate(model, test_set, hp.voc_gen_at_checkpoint, device)
         for i, (x, m, ids, _) in enumerate(train_set, 1):
 
             x, m = x.to(device), m.to(device)
@@ -132,30 +152,27 @@ def tts_train_loop(paths: Paths, model: Tacotron, optimizer, train_set, lr, trai
                 m1_hat, m2_hat, attention = data_parallel_workaround(model, x, m)
             else:
                 m1_hat, m2_hat, attention = model(x, m)
-
             m1_loss = F.l1_loss(m1_hat, m)
             m2_loss = F.l1_loss(m2_hat, m)
 
             loss = m1_loss + m2_loss
-
             optimizer.zero_grad()
             loss.backward()
             if hp.tts_clip_grad_norm is not None:
                 grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), hp.tts_clip_grad_norm)
-                if np.isnan(grad_norm):
+                if torch.isnan(grad_norm):
                     print('grad_norm was NaN!')
-
             optimizer.step()
 
             running_loss += loss.item()
             avg_loss = running_loss / i
-
             speed = i / (time.time() - start)
 
             step = model.get_step()
             k = step // 1000
 
             if step % hp.tts_checkpoint_every == 0:
+                val_loss = validate(model, test_set, hp.voc_gen_at_checkpoint, device)
                 ckpt_name = f'taco_step{k}K'
                 save_checkpoint('tts', paths, model, optimizer,
                                 name=ckpt_name, is_silent=True)
@@ -164,8 +181,7 @@ def tts_train_loop(paths: Paths, model: Tacotron, optimizer, train_set, lr, trai
                 idx = ids.index(attn_example)
                 save_attention(np_now(attention[idx][:, :160]), paths.tts_attention/f'{step}')
                 save_spectrogram(np_now(m2_hat[idx]), paths.tts_mel_plot/f'{step}', 600)
-
-            msg = f'| Epoch: {e}/{epochs} ({i}/{total_iters}) | Loss: {avg_loss:#.4} | {speed:#.2} steps/s | Step: {k}k | '
+            msg = f'| Epoch: {e}/{epochs} ({i}/{total_iters}) | val loss: {val_loss:#.4} | Loss: {avg_loss:#.4} | {speed:#.2} steps/s | Step: {k}k | '
             stream(msg)
 
         # Must save latest optimizer state to ensure that resuming training

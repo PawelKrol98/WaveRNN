@@ -6,7 +6,7 @@ from utils.paths import Paths
 from models.tacotron import Tacotron
 import argparse
 from utils.text import text_to_sequence
-from utils.display import save_attention, simple_table
+from utils.display import save_attention, simple_table, save_spectrogram
 from utils.dsp import reconstruct_waveform, save_wav
 import numpy as np
 
@@ -17,6 +17,7 @@ if __name__ == "__main__":
     parser.add_argument('--input_text', '-i', type=str, help='[string] Type in something here and TTS will generate it!')
     parser.add_argument('--tts_weights', type=str, help='[string/path] Load in different Tacotron weights')
     parser.add_argument('--save_attention', '-a', dest='save_attn', action='store_true', help='Save Attention Plots')
+    parser.add_argument('--save_mel', '-m', action='store_true', help='Save mel spectogram')
     parser.add_argument('--force_cpu', '-c', action='store_true', help='Forces CPU-only training, even when in CUDA capable environment')
     parser.add_argument('--hp_file', metavar='FILE', default='hparams.py', help='The file to use for the hyperparameters')
 
@@ -24,7 +25,7 @@ if __name__ == "__main__":
     parser.set_defaults(weights_path=None)
 
     # name of subcommand goes to args.vocoder
-    subparsers = parser.add_subparsers(required=True, dest='vocoder')
+    subparsers = parser.add_subparsers(dest='vocoder')
 
     wr_parser = subparsers.add_parser('wavernn', aliases=['wr'])
     wr_parser.add_argument('--batched', '-b', dest='batched', action='store_true', help='Fast Batched Generation')
@@ -143,6 +144,14 @@ if __name__ == "__main__":
         # Fix mel spectrogram scaling to be from 0 to 1
         m = (m + 4) / 8
         np.clip(m, 0, 1, out=m)
+
+        if args.save_mel:
+            if input_text:
+                save_spectrogram(m, paths.tts_output/f'__input_{input_text[:10]}_{tts_k}k')
+                np.save(paths.tts_output/f'__input_{input_text[:10]}_{tts_k}k.npy', m)
+            else:
+                save_spectrogram(m, paths.tts_output/f'{i}_{tts_k}k')
+                np.save(paths.tts_output/f'{i}_{tts_k}k.npy', m)
 
         if args.vocoder == 'griffinlim':
             v_type = args.vocoder
